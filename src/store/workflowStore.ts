@@ -147,6 +147,7 @@ interface WorkflowStore {
   _buildExecutionContext: (node: WorkflowNode, signal?: AbortSignal) => NodeExecutionContext;
   executeWorkflow: (startFromNodeId?: string) => Promise<void>;
   regenerateNode: (nodeId: string) => Promise<void>;
+  executeSelectedNodes: (nodeIds: string[]) => Promise<void>;
   stopWorkflow: () => void;
   setMaxConcurrentCalls: (value: number) => void;
 
@@ -1067,6 +1068,165 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
         status: "error",
         error: error instanceof Error ? error.message : "Regeneration failed",
       });
+      set({ isRunning: false, currentNodeIds: [] });
+
+      // Save logs to server (even on error)
+      const session = logger.getCurrentSession();
+      if (session) {
+        session.endTime = new Date().toISOString();
+        fetch('/api/logs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session }),
+        }).catch((err) => {
+          console.error('Failed to save log session:', err);
+        });
+      }
+
+      await logger.endSession();
+    }
+  },
+
+  executeSelectedNodes: async (nodeIds: string[]) => {
+    const { nodes, updateNodeData, isRunning, maxConcurrentCalls } = get();
+
+    if (isRunning) {
+      logger.warn('node.execution', 'Cannot execute nodes, workflow already running');
+      return;
+    }
+
+    if (nodeIds.length === 0) {
+      logger.warn('node.execution', 'No nodes provided for execution');
+      return;
+    }
+
+    // Filter to valid nodes
+    const nodesToExecute = nodeIds
+      .map((id) => nodes.find((n) => n.id === id))
+      .filter((n): n is WorkflowNode => n !== undefined);
+
+    if (nodesToExecute.length === 0) {
+      logger.warn('node.execution', 'No valid nodes found for execution');
+      return;
+    }
+
+    set({ isRunning: true, currentNodeIds: nodeIds });
+
+    await logger.startSession();
+    logger.info('node.execution', 'Executing selected nodes', {
+      nodeCount: nodesToExecute.length,
+      nodeIds,
+    });
+
+    // Helper to execute a single node
+    const executeNode = async (node: WorkflowNode) => {
+      logger.info('node.execution', `Executing ${node.type} node`, {
+        nodeId: node.id,
+        nodeType: node.type,
+      });
+
+      const executionCtx = get()._buildExecutionContext(node);
+      const regenOptions = { useStoredFallback: true };
+
+      switch (node.type) {
+        case "imageInput":
+        case "audioInput":
+          // Data source nodes - no execution needed
+          break;
+        case "annotation":
+          await executeAnnotation(executionCtx);
+          break;
+        case "prompt":
+          await executePrompt(executionCtx);
+          break;
+        case "promptConstructor":
+          await executePromptConstructor(executionCtx);
+          break;
+        case "nanoBanana":
+          await executeNanoBanana(executionCtx, regenOptions);
+          break;
+        case "generateVideo":
+          await executeGenerateVideo(executionCtx, regenOptions);
+          break;
+        case "llmGenerate":
+          await executeLlmGenerate(executionCtx, regenOptions);
+          break;
+        case "splitGrid":
+          await executeSplitGrid(executionCtx);
+          break;
+        case "output":
+          await executeOutput(executionCtx);
+          break;
+        case "outputGallery":
+          await executeOutputGallery(executionCtx);
+          break;
+        case "imageCompare":
+          await executeImageCompare(executionCtx);
+          break;
+        case "videoStitch":
+          await executeVideoStitch(executionCtx);
+          break;
+        case "easeCurve":
+          await executeEaseCurve(executionCtx);
+          break;
+      }
+    };
+
+    try {
+      // Execute nodes in batches respecting concurrency limit
+      const batches = chunk(nodesToExecute, maxConcurrentCalls);
+
+      for (const batch of batches) {
+        // Update currentNodeIds to show which nodes are executing
+        const batchIds = batch.map((n) => n.id);
+        set({ currentNodeIds: batchIds });
+
+        logger.info('node.execution', `Executing batch of selected nodes`, {
+          nodeCount: batch.length,
+          nodeIds: batchIds,
+        });
+
+        // Execute batch in parallel
+        const results = await Promise.allSettled(
+          batch.map((node) => executeNode(node))
+        );
+
+        // Check for failures
+        const failed = results.find(
+          (r): r is PromiseRejectedResult => r.status === 'rejected'
+        );
+
+        if (failed) {
+          logger.error('node.error', 'Node execution failed in batch', {
+            error: failed.reason instanceof Error ? failed.reason.message : String(failed.reason),
+          });
+          throw failed.reason;
+        }
+      }
+
+      logger.info('node.execution', 'Selected nodes execution completed successfully');
+      set({ isRunning: false, currentNodeIds: [] });
+
+      // Save logs to server
+      const session = logger.getCurrentSession();
+      if (session) {
+        session.endTime = new Date().toISOString();
+        fetch('/api/logs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session }),
+        }).catch((err) => {
+          console.error('Failed to save log session:', err);
+        });
+      }
+
+      await logger.endSession();
+    } catch (error) {
+      logger.error('node.error', 'Selected nodes execution failed', {}, error instanceof Error ? error : undefined);
+      useToast.getState().show(
+        `Execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        "error"
+      );
       set({ isRunning: false, currentNodeIds: [] });
 
       // Save logs to server (even on error)
