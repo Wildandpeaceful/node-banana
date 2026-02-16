@@ -13,6 +13,7 @@ import {
   AnnotationNodeData,
   NanoBananaNodeData,
   GenerateVideoNodeData,
+  GenerateAudioNodeData,
   VideoStitchNodeData,
   EaseCurveNodeData,
   PromptNodeData,
@@ -62,6 +63,8 @@ function getSourceOutput(sourceNode: WorkflowNode): { type: "image" | "text" | "
     return { type: "image", value: (sourceNode.data as NanoBananaNodeData).outputImage };
   } else if (sourceNode.type === "generateVideo") {
     return { type: "video", value: (sourceNode.data as GenerateVideoNodeData).outputVideo };
+  } else if (sourceNode.type === "generateAudio") {
+    return { type: "audio", value: (sourceNode.data as GenerateAudioNodeData).outputAudio };
   } else if (sourceNode.type === "videoStitch") {
     return { type: "video", value: (sourceNode.data as VideoStitchNodeData).outputVideo };
   } else if (sourceNode.type === "easeCurve") {

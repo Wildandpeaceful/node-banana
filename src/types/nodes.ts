@@ -30,6 +30,7 @@ export type NodeType =
   | "promptConstructor"
   | "nanoBanana"
   | "generateVideo"
+  | "generateAudio"
   | "llmGenerate"
   | "splitGrid"
   | "output"
@@ -174,6 +175,34 @@ export interface GenerateVideoNodeData extends BaseNodeData {
 }
 
 /**
+ * Carousel audio item for per-node audio history
+ */
+export interface CarouselAudioItem {
+  id: string;
+  timestamp: number;
+  prompt: string;
+  model: string; // Model ID for audio (not ModelType since external providers)
+}
+
+/**
+ * Generate Audio node - AI audio/TTS generation
+ */
+export interface GenerateAudioNodeData extends BaseNodeData {
+  inputPrompt: string | null;
+  outputAudio: string | null; // Audio data URL
+  outputAudioRef?: string; // External audio reference for storage optimization
+  selectedModel?: SelectedModel; // Required for audio generation
+  parameters?: Record<string, unknown>; // Model-specific parameters (voice, speed, etc.)
+  inputSchema?: ModelInputDef[]; // Model's input schema for dynamic handles
+  status: NodeStatus;
+  error: string | null;
+  audioHistory: CarouselAudioItem[]; // Carousel history (IDs only)
+  selectedAudioHistoryIndex: number; // Currently selected audio in carousel
+  duration: number | null; // Duration in seconds
+  format: string | null; // MIME type (audio/mp3, audio/wav, etc.)
+}
+
+/**
  * LLM Generate node - AI text generation
  */
 export interface LLMGenerateNodeData extends BaseNodeData {
@@ -292,6 +321,7 @@ export type WorkflowNodeData =
   | PromptConstructorNodeData
   | NanoBananaNodeData
   | GenerateVideoNodeData
+  | GenerateAudioNodeData
   | LLMGenerateNodeData
   | SplitGridNodeData
   | OutputNodeData
@@ -334,6 +364,14 @@ export interface GenerateVideoNodeDefaults {
   };
 }
 
+export interface GenerateAudioNodeDefaults {
+  selectedModel?: {
+    provider: ProviderType;
+    modelId: string;
+    displayName: string;
+  };
+}
+
 export interface LLMNodeDefaults {
   provider?: LLMProvider;
   model?: LLMModelType;
@@ -344,5 +382,6 @@ export interface LLMNodeDefaults {
 export interface NodeDefaultsConfig {
   generateImage?: GenerateImageNodeDefaults;
   generateVideo?: GenerateVideoNodeDefaults;
+  generateAudio?: GenerateAudioNodeDefaults;
   llm?: LLMNodeDefaults;
 }

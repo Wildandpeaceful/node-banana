@@ -33,6 +33,7 @@ const DEFAULT_DIMENSIONS: Record<NodeType, { width: number; height: number }> = 
   promptConstructor: { width: 340, height: 280 },
   nanoBanana: { width: 300, height: 300 },
   generateVideo: { width: 300, height: 300 },
+  generateAudio: { width: 300, height: 280 },
   llmGenerate: { width: 320, height: 360 },
   splitGrid: { width: 300, height: 320 },
   output: { width: 320, height: 320 },
@@ -248,6 +249,18 @@ function createDefaultNodeData(type: NodeType): WorkflowNodeData {
         error: null,
         videoHistory: [],
         selectedVideoHistoryIndex: 0,
+      };
+    case "generateAudio":
+      return {
+        inputPrompt: null,
+        outputAudio: null,
+        selectedModel: undefined,
+        status: "idle",
+        error: null,
+        audioHistory: [],
+        selectedAudioHistoryIndex: 0,
+        duration: null,
+        format: null,
       };
     case "llmGenerate":
       return {

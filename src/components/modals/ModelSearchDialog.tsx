@@ -89,7 +89,7 @@ function getPaneCenter() {
 }
 
 // Capability filter options
-type CapabilityFilter = "all" | "image" | "video";
+type CapabilityFilter = "all" | "image" | "video" | "audio";
 
 // API response type
 interface ModelsResponse {
@@ -413,9 +413,13 @@ export function ModelSearchDialog({
         const isVideo = matchingModel.capabilities.some(
           (cap) => cap === "text-to-video" || cap === "image-to-video"
         );
+        const isAudio = matchingModel.capabilities.some(
+          (cap) => cap === "text-to-audio"
+        );
 
         if (capabilityFilter === "image") return isImage;
         if (capabilityFilter === "video") return isVideo;
+        if (capabilityFilter === "audio") return isAudio;
         return true;
       })
       .slice(0, 4); // Show max 4
@@ -635,6 +639,7 @@ export function ModelSearchDialog({
               <option value="all">All Types</option>
               <option value="image">Image</option>
               <option value="video">Video</option>
+              <option value="audio">Audio</option>
             </select>
 
             {/* Refresh Cache */}

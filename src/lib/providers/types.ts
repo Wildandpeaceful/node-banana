@@ -15,7 +15,8 @@ export type ModelCapability =
   | "text-to-image"
   | "image-to-image"
   | "text-to-video"
-  | "image-to-video";
+  | "image-to-video"
+  | "text-to-audio";
 
 /**
  * Model parameter schema for dynamic UI generation
@@ -98,10 +99,10 @@ export interface GenerationInput {
 export interface GenerationOutput {
   /** Whether the generation succeeded */
   success: boolean;
-  /** Generated outputs (images or videos) */
+  /** Generated outputs (images, videos, or audio) */
   outputs?: Array<{
     /** Type of output */
-    type: "image" | "video";
+    type: "image" | "video" | "audio";
     /** Base64 data URL of the output */
     data: string;
     /** Original URL if applicable (e.g., from provider CDN) */
