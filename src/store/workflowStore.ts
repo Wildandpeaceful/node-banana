@@ -71,6 +71,9 @@ import {
   executeGenerate3D,
   executeGenerateAudio,
   executeLlmGenerate,
+  executeObjectIsolate,
+  executeFalIsolate,
+  executeSceneCopilot,
   executeSplitGrid,
   executeVideoStitch,
   executeEaseCurve,
@@ -653,6 +656,9 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   undo: () => {
     const state = get();
     if (state.undoHistory.length === 0) return;
+    if (state._abortController) {
+      state._abortController.abort();
+    }
 
     const currentSnapshot: WorkflowHistorySnapshot = {
       nodes: state.nodes,
@@ -692,12 +698,16 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       hasUnsavedChanges: true,
       isRunning: false,
       currentNodeIds: [],
+      _abortController: null,
     });
   },
 
   redo: () => {
     const state = get();
     if (state.redoHistory.length === 0) return;
+    if (state._abortController) {
+      state._abortController.abort();
+    }
 
     const currentSnapshot: WorkflowHistorySnapshot = {
       nodes: state.nodes,
@@ -736,6 +746,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       hasUnsavedChanges: true,
       isRunning: false,
       currentNodeIds: [],
+      _abortController: null,
     });
   },
 
@@ -753,7 +764,8 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   deleteSelection: (nodeIds: string[], groupIds: string[] = []) => {
-    const uniqueNodeIds = Array.from(new Set(nodeIds));
+    const existingNodeIds = new Set(get().nodes.map((node) => node.id));
+    const uniqueNodeIds = Array.from(new Set(nodeIds)).filter((nodeId) => existingNodeIds.has(nodeId));
     const uniqueGroupIds = Array.from(new Set(groupIds)).filter((groupId) => !!get().groups[groupId]);
     if (uniqueNodeIds.length === 0 && uniqueGroupIds.length === 0) return;
 
@@ -1564,6 +1576,15 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
           case "llmGenerate":
             await executeLlmGenerate(executionCtx);
             break;
+          case "objectIsolate":
+            await executeObjectIsolate(executionCtx);
+            break;
+          case "falIsolate":
+            await executeFalIsolate(executionCtx);
+            break;
+          case "sceneCopilot":
+            await executeSceneCopilot(executionCtx);
+            break;
           case "splitGrid":
             await executeSplitGrid(executionCtx);
             break;
@@ -1720,6 +1741,12 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
         await executeArray(executionCtx);
       } else if (node.type === "llmGenerate") {
         await executeLlmGenerate(executionCtx, regenOptions);
+      } else if (node.type === "objectIsolate") {
+        await executeObjectIsolate(executionCtx, regenOptions);
+      } else if (node.type === "falIsolate") {
+        await executeFalIsolate(executionCtx, regenOptions);
+      } else if (node.type === "sceneCopilot") {
+        await executeSceneCopilot(executionCtx, regenOptions);
       } else if (node.type === "generateVideo") {
         await executeGenerateVideo(executionCtx, regenOptions);
       } else if (node.type === "generate3d") {
@@ -1873,6 +1900,15 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
           break;
         case "llmGenerate":
           await executeLlmGenerate(executionCtx, regenOptions);
+          break;
+        case "objectIsolate":
+          await executeObjectIsolate(executionCtx, regenOptions);
+          break;
+        case "falIsolate":
+          await executeFalIsolate(executionCtx, regenOptions);
+          break;
+        case "sceneCopilot":
+          await executeSceneCopilot(executionCtx, regenOptions);
           break;
         case "generateAudio":
           await executeGenerateAudio(executionCtx, regenOptions);
