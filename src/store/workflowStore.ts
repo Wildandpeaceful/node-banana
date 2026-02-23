@@ -167,6 +167,172 @@ interface ClipboardData {
   edges: WorkflowEdge[];
 }
 
+interface WorkflowHistorySnapshot {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  groups: Record<string, NodeGroup>;
+  edgeStyle: EdgeStyle;
+}
+
+const MAX_WORKFLOW_HISTORY_ENTRIES = 60;
+const HISTORY_IGNORED_NODE_DATA_KEYS = new Set([
+  "status",
+  "error",
+  "outputImage",
+  "outputVideo",
+  "outputAudio",
+  "output3d",
+  "image",
+  "images",
+  "imageA",
+  "imageB",
+  "video",
+  "audio",
+  "glbUrl",
+  "capturedImage",
+  "imageHistory",
+  "videoHistory",
+  "audioHistory",
+  "inputImages",
+  "globalImageHistory",
+  "lastDetectionRaw",
+  "lastIsolationPrompt",
+]);
+
+function cloneHistorySnapshot(snapshot: WorkflowHistorySnapshot): WorkflowHistorySnapshot {
+  if (typeof globalThis.structuredClone === "function") {
+    return globalThis.structuredClone(snapshot) as WorkflowHistorySnapshot;
+  }
+  return JSON.parse(JSON.stringify(snapshot)) as WorkflowHistorySnapshot;
+}
+
+function toStructuralSnapshot(snapshot: WorkflowHistorySnapshot): WorkflowHistorySnapshot {
+  const cleanNodes = snapshot.nodes.map((node) => {
+    const data = node.data as Record<string, unknown>;
+    const cleanedEntries = Object.entries(data).filter(([key]) => !HISTORY_IGNORED_NODE_DATA_KEYS.has(key));
+    return {
+      ...node,
+      data: Object.fromEntries(cleanedEntries) as WorkflowNodeData,
+    } as WorkflowNode;
+  });
+  return {
+    nodes: cleanNodes,
+    edges: snapshot.edges,
+    groups: snapshot.groups,
+    edgeStyle: snapshot.edgeStyle,
+  };
+}
+
+function isStructurallyEqualSnapshot(a: WorkflowHistorySnapshot, b: WorkflowHistorySnapshot): boolean {
+  return JSON.stringify(toStructuralSnapshot(a)) === JSON.stringify(toStructuralSnapshot(b));
+}
+
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function rectsOverlap(a: Rect, b: Rect, padding = 16): boolean {
+  return !(
+    a.x + a.width + padding <= b.x ||
+    b.x + b.width + padding <= a.x ||
+    a.y + a.height + padding <= b.y ||
+    b.y + b.height + padding <= a.y
+  );
+}
+
+function getNodeRect(node: WorkflowNode): Rect {
+  const defaults = defaultNodeDimensions[node.type as NodeType] || { width: 300, height: 280 };
+  const width = node.measured?.width || (node.style?.width as number) || defaults.width;
+  const height = node.measured?.height || (node.style?.height as number) || defaults.height;
+  return {
+    x: node.position.x,
+    y: node.position.y,
+    width,
+    height,
+  };
+}
+
+function getGroupRect(group: NodeGroup): Rect {
+  const width = Math.max(1, group.size?.width ?? 320);
+  const height = Math.max(1, group.size?.height ?? 220);
+  return {
+    x: group.position.x,
+    y: group.position.y,
+    width,
+    height,
+  };
+}
+
+function getRectsBoundingBox(rects: Rect[]): Rect {
+  if (rects.length === 0) {
+    return { x: 0, y: 0, width: 0, height: 0 };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  rects.forEach((r) => {
+    minX = Math.min(minX, r.x);
+    minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.width);
+    maxY = Math.max(maxY, r.y + r.height);
+  });
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(0, maxX - minX),
+    height: Math.max(0, maxY - minY),
+  };
+}
+
+function findNonOverlappingOffset(
+  sourceRects: Rect[],
+  occupiedRects: Rect[],
+  preferredOffset: XYPosition
+): XYPosition {
+  if (sourceRects.length === 0) return preferredOffset;
+
+  const overlapsAtOffset = (offset: XYPosition): boolean => {
+    const shiftedRects = sourceRects.map((rect) => ({
+      x: rect.x + offset.x,
+      y: rect.y + offset.y,
+      width: rect.width,
+      height: rect.height,
+    }));
+    return shiftedRects.some((shifted) =>
+      occupiedRects.some((occupied) => rectsOverlap(shifted, occupied, 20))
+    );
+  };
+
+  if (!overlapsAtOffset(preferredOffset)) return preferredOffset;
+
+  const gridStep = 120;
+  const maxRings = 40;
+  for (let ring = 1; ring <= maxRings; ring++) {
+    for (let dx = -ring; dx <= ring; dx++) {
+      for (let dy = -ring; dy <= ring; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
+        const candidate = {
+          x: preferredOffset.x + dx * gridStep,
+          y: preferredOffset.y + dy * gridStep,
+        };
+        if (!overlapsAtOffset(candidate)) return candidate;
+      }
+    }
+  }
+
+  // Final fallback: move to the right side of current occupied bounds.
+  const sourceBounds = getRectsBoundingBox(sourceRects);
+  const occupiedBounds = getRectsBoundingBox(occupiedRects);
+  return {
+    x: (occupiedBounds.x + occupiedBounds.width + 120) - sourceBounds.x,
+    y: occupiedBounds.y - sourceBounds.y,
+  };
+}
+
 interface WorkflowStore {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
@@ -193,17 +359,32 @@ interface WorkflowStore {
   // Copy/Paste operations
   copySelectedNodes: () => void;
   pasteNodes: (offset?: XYPosition) => void;
+  duplicateSelectedNodes: (options?: XYPosition | { offset?: XYPosition; selectedGroupId?: string | null }) => void;
   clearClipboard: () => void;
 
   // Group operations
   createGroup: (nodeIds: string[]) => string;
   deleteGroup: (groupId: string) => void;
+  deleteGroupWithNodes: (groupId: string) => void;
   addNodesToGroup: (nodeIds: string[], groupId: string) => void;
   removeNodesFromGroup: (nodeIds: string[]) => void;
   updateGroup: (groupId: string, updates: Partial<NodeGroup>) => void;
   toggleGroupLock: (groupId: string) => void;
   moveGroupNodes: (groupId: string, delta: { x: number; y: number }) => void;
   setNodeGroupId: (nodeId: string, groupId: string | undefined) => void;
+  selectedGroupId: string | null;
+  setSelectedGroupId: (groupId: string | null) => void;
+  deleteSelection: (nodeIds: string[], groupIds?: string[]) => void;
+
+  // Workflow history
+  undoHistory: WorkflowHistorySnapshot[];
+  redoHistory: WorkflowHistorySnapshot[];
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
+  clearUndoRedoHistory: () => void;
+  _pushHistorySnapshot: () => void;
 
   // UI State
   openModalCount: number;
@@ -375,6 +556,11 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   edgeStyle: "curved" as EdgeStyle,
   clipboard: null,
   groups: {},
+  selectedGroupId: null,
+  undoHistory: [],
+  redoHistory: [],
+  canUndo: false,
+  canRedo: false,
   openModalCount: 0,
   isModalOpen: false,
   showQuickstart: true,
@@ -426,7 +612,186 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   canvasNavigationSettings: getCanvasNavigationSettings(),
 
   setEdgeStyle: (style: EdgeStyle) => {
+    if (get().edgeStyle === style) return;
+    get()._pushHistorySnapshot();
     set({ edgeStyle: style });
+  },
+
+  _pushHistorySnapshot: () => {
+    const state = get();
+    if (state.isRunning) return;
+
+    const snapshot: WorkflowHistorySnapshot = {
+      nodes: state.nodes,
+      edges: state.edges,
+      groups: state.groups,
+      edgeStyle: state.edgeStyle,
+    };
+
+    const last = state.undoHistory[state.undoHistory.length - 1];
+    if (
+      last &&
+      last.nodes === snapshot.nodes &&
+      last.edges === snapshot.edges &&
+      last.groups === snapshot.groups &&
+      last.edgeStyle === snapshot.edgeStyle
+    ) return;
+
+    const nextUndoHistory = [...state.undoHistory, cloneHistorySnapshot(snapshot)];
+    const boundedUndoHistory = nextUndoHistory.length > MAX_WORKFLOW_HISTORY_ENTRIES
+      ? nextUndoHistory.slice(nextUndoHistory.length - MAX_WORKFLOW_HISTORY_ENTRIES)
+      : nextUndoHistory;
+
+    set({
+      undoHistory: boundedUndoHistory,
+      redoHistory: [],
+      canUndo: boundedUndoHistory.length > 0,
+      canRedo: false,
+    });
+  },
+
+  undo: () => {
+    const state = get();
+    if (state.undoHistory.length === 0) return;
+
+    const currentSnapshot: WorkflowHistorySnapshot = {
+      nodes: state.nodes,
+      edges: state.edges,
+      groups: state.groups,
+      edgeStyle: state.edgeStyle,
+    };
+
+    let targetIndex = state.undoHistory.length - 1;
+    while (targetIndex >= 0 && isStructurallyEqualSnapshot(state.undoHistory[targetIndex], currentSnapshot)) {
+      targetIndex -= 1;
+    }
+    if (targetIndex < 0) return;
+
+    const targetSnapshot = state.undoHistory[targetIndex];
+    const skippedSnapshots = state.undoHistory.slice(targetIndex + 1);
+    const nextUndoHistory = state.undoHistory.slice(0, targetIndex);
+    const nextRedoHistory = [
+      ...state.redoHistory,
+      ...skippedSnapshots.map((snapshot) => cloneHistorySnapshot(snapshot)),
+      cloneHistorySnapshot(currentSnapshot),
+    ];
+    const boundedRedoHistory = nextRedoHistory.length > MAX_WORKFLOW_HISTORY_ENTRIES
+      ? nextRedoHistory.slice(nextRedoHistory.length - MAX_WORKFLOW_HISTORY_ENTRIES)
+      : nextRedoHistory;
+
+    const restored = cloneHistorySnapshot(targetSnapshot);
+    set({
+      nodes: restored.nodes,
+      edges: restored.edges,
+      groups: restored.groups,
+      edgeStyle: restored.edgeStyle,
+      undoHistory: nextUndoHistory,
+      redoHistory: boundedRedoHistory,
+      canUndo: nextUndoHistory.length > 0,
+      canRedo: boundedRedoHistory.length > 0,
+      hasUnsavedChanges: true,
+      isRunning: false,
+      currentNodeIds: [],
+    });
+  },
+
+  redo: () => {
+    const state = get();
+    if (state.redoHistory.length === 0) return;
+
+    const currentSnapshot: WorkflowHistorySnapshot = {
+      nodes: state.nodes,
+      edges: state.edges,
+      groups: state.groups,
+      edgeStyle: state.edgeStyle,
+    };
+
+    let targetIndex = state.redoHistory.length - 1;
+    while (targetIndex >= 0 && isStructurallyEqualSnapshot(state.redoHistory[targetIndex], currentSnapshot)) {
+      targetIndex -= 1;
+    }
+    if (targetIndex < 0) return;
+
+    const targetSnapshot = state.redoHistory[targetIndex];
+    const skippedSnapshots = state.redoHistory.slice(targetIndex + 1);
+    const nextRedoHistory = state.redoHistory.slice(0, targetIndex);
+    const nextUndoHistory = [...state.undoHistory, cloneHistorySnapshot(currentSnapshot)];
+    for (const skipped of skippedSnapshots) {
+      nextUndoHistory.push(cloneHistorySnapshot(skipped));
+    }
+    const boundedUndoHistory = nextUndoHistory.length > MAX_WORKFLOW_HISTORY_ENTRIES
+      ? nextUndoHistory.slice(nextUndoHistory.length - MAX_WORKFLOW_HISTORY_ENTRIES)
+      : nextUndoHistory;
+
+    const restored = cloneHistorySnapshot(targetSnapshot);
+    set({
+      nodes: restored.nodes,
+      edges: restored.edges,
+      groups: restored.groups,
+      edgeStyle: restored.edgeStyle,
+      undoHistory: boundedUndoHistory,
+      redoHistory: nextRedoHistory,
+      canUndo: boundedUndoHistory.length > 0,
+      canRedo: nextRedoHistory.length > 0,
+      hasUnsavedChanges: true,
+      isRunning: false,
+      currentNodeIds: [],
+    });
+  },
+
+  clearUndoRedoHistory: () => {
+    set({
+      undoHistory: [],
+      redoHistory: [],
+      canUndo: false,
+      canRedo: false,
+    });
+  },
+
+  setSelectedGroupId: (groupId: string | null) => {
+    set({ selectedGroupId: groupId });
+  },
+
+  deleteSelection: (nodeIds: string[], groupIds: string[] = []) => {
+    const uniqueNodeIds = Array.from(new Set(nodeIds));
+    const uniqueGroupIds = Array.from(new Set(groupIds)).filter((groupId) => !!get().groups[groupId]);
+    if (uniqueNodeIds.length === 0 && uniqueGroupIds.length === 0) return;
+
+    get()._pushHistorySnapshot();
+
+    set((state) => {
+      const nodesFromGroups = new Set(
+        state.nodes
+          .filter((node) => node.groupId && uniqueGroupIds.includes(node.groupId))
+          .map((node) => node.id)
+      );
+
+      const nodesToDelete = new Set<string>([...uniqueNodeIds, ...nodesFromGroups]);
+      const groupIdsToDelete = new Set<string>(uniqueGroupIds);
+
+      const remainingNodes = state.nodes.filter((node) => !nodesToDelete.has(node.id));
+      const remainingEdges = state.edges.filter(
+        (edge) => !nodesToDelete.has(edge.source) && !nodesToDelete.has(edge.target)
+      );
+
+      const remainingGroups = { ...state.groups };
+      for (const groupId of groupIdsToDelete) {
+        delete remainingGroups[groupId];
+      }
+
+      return {
+        nodes: remainingNodes,
+        edges: remainingEdges,
+        groups: remainingGroups,
+        selectedGroupId:
+          state.selectedGroupId && groupIdsToDelete.has(state.selectedGroupId)
+            ? null
+            : state.selectedGroupId,
+        hasUnsavedChanges: true,
+      };
+    });
+
+    get().incrementManualChangeCount();
   },
 
   incrementModalCount: () => {
@@ -448,6 +813,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   addNode: (type: NodeType, position: XYPosition, initialData?: Partial<WorkflowNodeData>) => {
+    get()._pushHistorySnapshot();
     const id = `${type}-${++nodeIdCounter}`;
 
     const { width, height } = defaultNodeDimensions[type];
@@ -477,6 +843,22 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   updateNodeData: (nodeId: string, data: Partial<WorkflowNodeData>) => {
+    const targetNode = get().nodes.find((node) => node.id === nodeId);
+    if (!targetNode) return;
+
+    const hasAnyChange = Object.entries(data).some(([key, value]) => {
+      const currentValue = (targetNode.data as Record<string, unknown>)[key];
+      return currentValue !== value;
+    });
+    if (!hasAnyChange) return;
+
+    // Avoid storing large/volatile execution updates in undo history.
+    // Structural actions (add/delete/connect/duplicate/move) are already tracked elsewhere.
+    const shouldRecordHistory = Object.keys(data).some((key) => !HISTORY_IGNORED_NODE_DATA_KEYS.has(key));
+    if (shouldRecordHistory) {
+      get()._pushHistorySnapshot();
+    }
+
     set((state) => ({
       nodes: state.nodes.map((node) =>
         node.id === nodeId
@@ -488,6 +870,9 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   removeNode: (nodeId: string) => {
+    const nodeExists = get().nodes.some((node) => node.id === nodeId);
+    if (!nodeExists) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       nodes: state.nodes.filter((node) => node.id !== nodeId),
       edges: state.edges.filter(
@@ -505,6 +890,18 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     );
     // Track manual changes only for remove operations (not position/selection/dimensions)
     const hasRemoveChange = changes.some((c) => c.type === "remove");
+    const hasHistoryChange = changes.some((c) => {
+      if (c.type === "add" || c.type === "replace") return true;
+      if (c.type === "position") {
+        const dragging = (c as NodeChange<WorkflowNode> & { dragging?: boolean }).dragging;
+        return dragging === false || dragging === undefined;
+      }
+      return false;
+    });
+
+    if (hasHistoryChange) {
+      get()._pushHistorySnapshot();
+    }
 
     set((state) => ({
       nodes: applyNodeChanges(changes, state.nodes),
@@ -522,6 +919,14 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     // Track manual changes only for remove operations (not selection)
     const hasRemoveChange = changes.some((c) => c.type === "remove");
 
+    // Delete snapshots are captured in WorkflowCanvas onBeforeDelete to ensure
+    // node+edge deletions are a single history entry.
+    const hasHistoryChange = changes.some((c) => c.type !== "select" && c.type !== "remove");
+
+    if (hasHistoryChange) {
+      get()._pushHistorySnapshot();
+    }
+
     set((state) => ({
       edges: applyEdgeChanges(changes, state.edges),
       ...(hasMeaningfulChange ? { hasUnsavedChanges: true } : {}),
@@ -533,6 +938,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   onConnect: (connection: Connection, edgeDataOverrides?: Record<string, unknown>) => {
+    get()._pushHistorySnapshot();
     set((state) => {
       const baseData = buildConnectionEdgeData(connection, state.nodes, state.edges);
       const newEdge = {
@@ -550,6 +956,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   addEdgeWithType: (connection: Connection, edgeType: string, edgeDataOverrides?: Record<string, unknown>) => {
+    get()._pushHistorySnapshot();
     set((state) => {
       const baseData = buildConnectionEdgeData(connection, state.nodes, state.edges);
       const newEdge = {
@@ -563,9 +970,13 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
         hasUnsavedChanges: true,
       };
     });
+    get().incrementManualChangeCount();
   },
 
   removeEdge: (edgeId: string) => {
+    const edgeExists = get().edges.some((edge) => edge.id === edgeId);
+    if (!edgeExists) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       edges: state.edges.filter((edge) => edge.id !== edgeId),
       hasUnsavedChanges: true,
@@ -574,6 +985,9 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   toggleEdgePause: (edgeId: string) => {
+    const edgeExists = get().edges.some((edge) => edge.id === edgeId);
+    if (!edgeExists) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       edges: state.edges.map((edge) =>
         edge.id === edgeId
@@ -608,6 +1022,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     const { clipboard, nodes, edges } = get();
 
     if (!clipboard || clipboard.nodes.length === 0) return;
+    get()._pushHistorySnapshot();
 
     // Create a mapping from old node IDs to new node IDs
     const idMapping = new Map<string, string>();
@@ -665,6 +1080,134 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     });
   },
 
+  duplicateSelectedNodes: (options: XYPosition | { offset?: XYPosition; selectedGroupId?: string | null } = { x: 50, y: 50 }) => {
+    const { nodes, edges, groups } = get();
+    const isPointOptions =
+      typeof options === "object" &&
+      options !== null &&
+      "x" in options &&
+      "y" in options &&
+      typeof options.x === "number" &&
+      typeof options.y === "number";
+    const opts = isPointOptions
+      ? { offset: options as XYPosition, selectedGroupId: null as string | null }
+      : {
+          offset: (options as { offset?: XYPosition; selectedGroupId?: string | null }).offset || { x: 50, y: 50 },
+          selectedGroupId: (options as { offset?: XYPosition; selectedGroupId?: string | null }).selectedGroupId ?? null,
+        };
+
+    const selectedNodes = nodes.filter((node) => node.selected);
+    const selectedNodeIdSet = new Set(selectedNodes.map((node) => node.id));
+
+    // Support duplicating an explicitly selected group even when no node is selected.
+    const groupIdsToDuplicate = new Set<string>();
+    if (opts.selectedGroupId && groups[opts.selectedGroupId]) {
+      groupIdsToDuplicate.add(opts.selectedGroupId);
+    }
+    const selectedGroupCandidates = Array.from(
+      new Set(selectedNodes.map((n) => n.groupId).filter((g): g is string => !!g))
+    );
+    selectedGroupCandidates.forEach((groupId) => {
+      const groupNodes = nodes.filter((n) => n.groupId === groupId);
+      const fullSelected = groupNodes.length > 0 && groupNodes.every((n) => selectedNodeIdSet.has(n.id));
+      if (fullSelected) groupIdsToDuplicate.add(groupId);
+    });
+
+    const nodesFromGroups = nodes.filter((n) => n.groupId && groupIdsToDuplicate.has(n.groupId));
+    const nodesToDuplicateMap = new Map<string, WorkflowNode>();
+    [...selectedNodes, ...nodesFromGroups].forEach((node) => nodesToDuplicateMap.set(node.id, node));
+    const nodesToDuplicate = Array.from(nodesToDuplicateMap.values());
+
+    if (nodesToDuplicate.length === 0) return;
+
+    get()._pushHistorySnapshot();
+
+    const selectedNodeIds = new Set(nodesToDuplicate.map((node) => node.id));
+    const idMapping = new Map<string, string>();
+    nodesToDuplicate.forEach((node) => {
+      idMapping.set(node.id, `${node.type}-${++nodeIdCounter}`);
+    });
+
+    const groupIdMapping = new Map<string, string>();
+    const newGroups: Record<string, NodeGroup> = {};
+    Array.from(groupIdsToDuplicate).forEach((oldGroupId) => {
+      const group = groups[oldGroupId];
+      if (!group) return;
+
+      const newGroupId = `group-${++groupIdCounter}`;
+      groupIdMapping.set(oldGroupId, newGroupId);
+      newGroups[newGroupId] = {
+        ...JSON.parse(JSON.stringify(group)) as NodeGroup,
+        id: newGroupId,
+        name: `${group.name} Copy`,
+      };
+    });
+
+    // Find a non-overlapping placement offset.
+    const sourceNodeRects = nodesToDuplicate.map(getNodeRect);
+    const sourceGroupRects = Array.from(groupIdsToDuplicate)
+      .map((groupId) => groups[groupId])
+      .filter((group): group is NodeGroup => !!group)
+      .map(getGroupRect);
+    const sourceRects = [...sourceNodeRects, ...sourceGroupRects];
+    const occupiedRects: Rect[] = [
+      ...nodes.map(getNodeRect),
+      ...Object.values(groups).map(getGroupRect),
+    ];
+    const chosenOffset = findNonOverlappingOffset(sourceRects, occupiedRects, opts.offset);
+
+    // Position new groups at the same chosen offset.
+    groupIdMapping.forEach((newGroupId, oldGroupId) => {
+      const oldGroup = groups[oldGroupId];
+      const newGroup = newGroups[newGroupId];
+      if (!oldGroup || !newGroup) return;
+      newGroups[newGroupId] = {
+        ...newGroup,
+        position: {
+          x: oldGroup.position.x + chosenOffset.x,
+          y: oldGroup.position.y + chosenOffset.y,
+        },
+      };
+    });
+
+    const newNodes: WorkflowNode[] = nodesToDuplicate.map((node) => {
+      const mappedGroupId = node.groupId ? groupIdMapping.get(node.groupId) : undefined;
+      return {
+        ...node,
+        id: idMapping.get(node.id)!,
+        position: {
+          x: node.position.x + chosenOffset.x,
+          y: node.position.y + chosenOffset.y,
+        },
+        selected: true,
+        groupId: mappedGroupId,
+        data: JSON.parse(JSON.stringify(node.data)),
+      };
+    });
+
+    const newEdges: WorkflowEdge[] = edges
+      .filter((edge) => selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target))
+      .map((edge) => ({
+        ...edge,
+        id: `edge-${idMapping.get(edge.source)}-${idMapping.get(edge.target)}-${edge.sourceHandle || "default"}-${edge.targetHandle || "default"}`,
+        source: idMapping.get(edge.source)!,
+        target: idMapping.get(edge.target)!,
+      }));
+
+    const deselectedOriginalNodes = nodes.map((node) => ({ ...node, selected: false }));
+    set({
+      nodes: [...deselectedOriginalNodes, ...newNodes] as WorkflowNode[],
+      edges: [...edges, ...newEdges],
+      groups: { ...groups, ...newGroups },
+      selectedGroupId:
+        groupIdsToDuplicate.size === 1
+          ? groupIdMapping.get(Array.from(groupIdsToDuplicate)[0]) || null
+          : null,
+      hasUnsavedChanges: true,
+    });
+    get().incrementManualChangeCount();
+  },
+
   clearClipboard: () => {
     set({ clipboard: null });
   },
@@ -678,6 +1221,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     // Get the nodes to group
     const nodesToGroup = nodes.filter((n) => nodeIds.includes(n.id));
     if (nodesToGroup.length === 0) return "";
+    get()._pushHistorySnapshot();
 
     // Calculate bounding box of selected nodes
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -739,6 +1283,8 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   deleteGroup: (groupId: string) => {
+    if (!get().groups[groupId]) return;
+    get()._pushHistorySnapshot();
     set((state) => {
       const { [groupId]: _, ...remainingGroups } = state.groups;
       return {
@@ -746,12 +1292,36 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
           node.groupId === groupId ? { ...node, groupId: undefined } : node
         ) as WorkflowNode[],
         groups: remainingGroups,
+        selectedGroupId: state.selectedGroupId === groupId ? null : state.selectedGroupId,
         hasUnsavedChanges: true,
       };
     });
   },
 
+  deleteGroupWithNodes: (groupId: string) => {
+    if (!get().groups[groupId]) return;
+    get()._pushHistorySnapshot();
+    set((state) => {
+      const nodesToDelete = new Set(
+        state.nodes.filter((node) => node.groupId === groupId).map((node) => node.id)
+      );
+      const { [groupId]: _, ...remainingGroups } = state.groups;
+      return {
+        nodes: state.nodes.filter((node) => !nodesToDelete.has(node.id)),
+        edges: state.edges.filter(
+          (edge) => !nodesToDelete.has(edge.source) && !nodesToDelete.has(edge.target)
+        ),
+        groups: remainingGroups,
+        selectedGroupId: state.selectedGroupId === groupId ? null : state.selectedGroupId,
+        hasUnsavedChanges: true,
+      };
+    });
+    get().incrementManualChangeCount();
+  },
+
   addNodesToGroup: (nodeIds: string[], groupId: string) => {
+    if (nodeIds.length === 0) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       nodes: state.nodes.map((node) =>
         nodeIds.includes(node.id) ? { ...node, groupId } : node
@@ -761,6 +1331,8 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   removeNodesFromGroup: (nodeIds: string[]) => {
+    if (nodeIds.length === 0) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       nodes: state.nodes.map((node) =>
         nodeIds.includes(node.id) ? { ...node, groupId: undefined } : node
@@ -770,6 +1342,8 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   updateGroup: (groupId: string, updates: Partial<NodeGroup>) => {
+    if (!get().groups[groupId]) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       groups: {
         ...state.groups,
@@ -780,6 +1354,8 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   toggleGroupLock: (groupId: string) => {
+    if (!get().groups[groupId]) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       groups: {
         ...state.groups,
@@ -793,6 +1369,8 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   moveGroupNodes: (groupId: string, delta: { x: number; y: number }) => {
+    if (delta.x === 0 && delta.y === 0) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       nodes: state.nodes.map((node) =>
         node.groupId === groupId
@@ -810,6 +1388,9 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   setNodeGroupId: (nodeId: string, groupId: string | undefined) => {
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node || node.groupId === groupId) return;
+    get()._pushHistorySnapshot();
     set((state) => ({
       nodes: state.nodes.map((node) =>
         node.id === nodeId ? { ...node, groupId } : node
@@ -1566,6 +2147,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       edges: hydratedWorkflow.edges,
       edgeStyle: hydratedWorkflow.edgeStyle || "angular",
       groups: hydratedWorkflow.groups || {},
+      selectedGroupId: null,
       isRunning: false,
       currentNodeIds: [],
       // Restore workflow ID and paths from localStorage if available
@@ -1583,6 +2165,10 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       useExternalImageStorage: savedConfig?.useExternalImageStorage ?? true,
       // Reset viewed comments when loading new workflow
       viewedCommentNodeIds: new Set<string>(),
+      undoHistory: [],
+      redoHistory: [],
+      canUndo: false,
+      canRedo: false,
     });
 
     // Clear snapshot unless explicitly preserving (e.g., AI workflow generation)
@@ -1596,6 +2182,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       nodes: [],
       edges: [],
       groups: {},
+      selectedGroupId: null,
       isRunning: false,
       currentNodeIds: [],
       // Reset auto-save state when clearing workflow
@@ -1611,6 +2198,10 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       imageRefBasePath: null,
       // Reset viewed comments when clearing workflow
       viewedCommentNodeIds: new Set<string>(),
+      undoHistory: [],
+      redoHistory: [],
+      canUndo: false,
+      canRedo: false,
     });
     get().clearSnapshot();
   },
@@ -1645,6 +2236,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   setWorkflowName: (name: string) => {
+    if (get().workflowName === name) return;
     set({
       workflowName: name,
       hasUnsavedChanges: true,
@@ -2091,6 +2683,10 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   applyEditOperations: (operations) => {
+    if (operations.length === 0) {
+      return { applied: 0, skipped: [] };
+    }
+    get()._pushHistorySnapshot();
     const state = get();
     const result = executeEditOps(operations, {
       nodes: state.nodes,
